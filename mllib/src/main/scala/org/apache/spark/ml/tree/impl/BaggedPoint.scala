@@ -19,12 +19,14 @@ package org.apache.spark.ml.tree.impl
 
 import org.apache.commons.math3.distribution.PoissonDistribution
 
+import org.apache.spark.ml.feature.LabeledPoint
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.Utils
 import org.apache.spark.util.random.XORShiftRandom
 
+
 /**
- * Internal representation of a datapoint which belongs to several subsamples of the same dataset,
+ * Internal representation of a   datapoint which belongs to several subsamples of the same dataset,
  * particularly for bagging (e.g., for random forests).
  *
  * This holds one instance, as well as an array of weights which represent the (weighted)
@@ -38,11 +40,18 @@ import org.apache.spark.util.random.XORShiftRandom
  * TODO: This does not currently support (Double) weighted instances.  Once MLlib has weighted
  *       dataset support, update.  (We store subsampleWeights as Double for this future extension.)
  */
-private[spark] class BaggedPoint[Datum](val datum: Datum, val subsampleWeights: Array[Double])
-  extends Serializable
 
-private[spark] object BaggedPoint {
+// private[spark] class BaggedPoint[Datum](
+class BaggedPoint[Datum](
+  val datum: Datum,
+  val subsampleWeights: Array[Double]) extends Serializable
 
+object BaggedPoint {
+  /**
+   * Unbalanced es para indicar si las clases estan desbalanceadas, se indica dentro
+   * de la clase ya que no se debe de modificar la clase RandomForest
+   */
+  val unbalanced = true
   /**
    * Convert an input dataset into its BaggedPoint representation,
    * choosing subsamplingRate counts for each instance.
@@ -55,12 +64,16 @@ private[spark] object BaggedPoint {
    * @param seed Random seed.
    * @return BaggedPoint dataset representation.
    */
-  def convertToBaggedRDD[Datum] (
-      input: RDD[Datum],
+  def convertToBaggedRDD(
+      input: RDD[TreePoint],
       subsamplingRate: Double,
       numSubsamples: Int,
       withReplacement: Boolean,
-      seed: Long = Utils.random.nextLong()): RDD[BaggedPoint[Datum]] = {
+      seed: Long = Utils.random.nextLong()): RDD[BaggedPoint[TreePoint]] = {
+    if (unbalanced) {
+      return convertToBaggedRDDSamplingWithReplacementForDesbalancedClass(input,
+        subsamplingRate, numSubsamples, seed)
+    }
     if (withReplacement) {
       convertToBaggedRDDSamplingWithReplacement(input, subsamplingRate, numSubsamples, seed)
     } else {
@@ -102,12 +115,12 @@ private[spark] object BaggedPoint {
       numSubsamples: Int,
       seed: Long): RDD[BaggedPoint[Datum]] = {
     input.mapPartitionsWithIndex { (partitionIndex, instances) =>
-      // Use random seed = seed + partitionIndex + 1 to make generation reproducible.
+        // Use random seed = seed + partitionIndex + 1 to make generation reproducible.
       val poisson = new PoissonDistribution(subsample)
       poisson.reseedRandomGenerator(seed + partitionIndex + 1)
       instances.map { instance =>
         val subsampleWeights = new Array[Double](numSubsamples)
-        var subsampleIndex = 0
+          var subsampleIndex = 0
         while (subsampleIndex < numSubsamples) {
           subsampleWeights(subsampleIndex) = poisson.sample()
           subsampleIndex += 1
@@ -115,6 +128,36 @@ private[spark] object BaggedPoint {
         new BaggedPoint(instance, subsampleWeights)
       }
     }
+  }
+
+  // Realizar pruebas
+  // Usar Datum
+
+  private def convertToBaggedRDDSamplingWithReplacementForDesbalancedClass (
+      input: RDD[TreePoint],
+      subsampleMinorityClass: Double,
+      numSubsamples: Int,
+      seed: Long): RDD[BaggedPoint[TreePoint]] = {
+    var c1 = input.filter(_.label == 0)
+    var c2 = input.filter(_.label == 1)
+    var numOfIntancesInC1 = c1.count()
+    var numOfIntancesInC2 = c2.count()
+    if(numOfIntancesInC2 < numOfIntancesInC1) {
+      val aux = c2
+      c2 = c1
+      c1 = aux
+      val aux2 = numOfIntancesInC2
+      numOfIntancesInC2 = numOfIntancesInC1
+      numOfIntancesInC1 = aux2
+    }
+    val numOfSamplingInC1 = numOfIntancesInC1*subsampleMinorityClass
+    val subsampleMajorityClass = numOfSamplingInC1.toFloat/numOfIntancesInC2
+
+    val c1Bagged = BaggedPoint.convertToBaggedRDDSamplingWithReplacement(c1,
+      subsampleMinorityClass, numSubsamples, seed)
+    val c2Bagged = BaggedPoint.convertToBaggedRDDSamplingWithReplacement(c2,
+      subsampleMajorityClass, numSubsamples, seed)
+    c1Bagged.union(c2Bagged)
   }
 
   private def convertToBaggedRDDWithoutSampling[Datum] (
